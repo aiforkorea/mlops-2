@@ -1,0 +1,7 @@
+<!-- apps/main/templates/main/index.html -->
+{%  extends  "base.html"  %} 
+{% block title %} Flask ML App{% endblock %}
+{% block content %}
+<h4 class="alert alert-primary" >Welcome to the Flask ML Service!</h4>
+<a href="/iris/predict">iris 예측 |  <a href="/iris/ai_results">iris 추론목록 | <a href="/iris/ai_logs">iris 로그목록 | <a href="/photo/predict">사물 예측 </a>
+{% endblock %}

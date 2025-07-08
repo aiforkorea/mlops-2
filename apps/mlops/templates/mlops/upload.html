@@ -1,0 +1,23 @@
+{# apps/mlops/templates/mlops/upload.html #}
+{% extends "mlops/base.html" %}
+{% block content %}
+    <h2>CSV 파일 업로드</h2>
+    <form method="post" enctype="multipart/form-data">
+        {{ form.csrf_token }} {# CSRF 토큰 렌더링 #}
+        <div>
+            {{ form.file.label }}<br> {# 'file' 필드의 라벨 렌더링 #}
+            {{ form.file(class="form-control") }} {# 'file' 필드 (input type="file") 렌더링. CSS 클래스 추가 가능 #}
+            {% if form.file.errors %} {# 'file' 필드에 유효성 검사 오류가 있다면 표시 #}
+                <ul class="errors">
+                    {% for error in form.file.errors %}
+                        <li>{{ error }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        </div>
+        <br> {# 간격 조절용 #}
+        <div>
+            {{ form.submit(class="btn btn-primary") }} {# 'submit' 버튼 렌더링. CSS 클래스 추가 가능 #}
+        </div>
+    </form>
+{% endblock %}

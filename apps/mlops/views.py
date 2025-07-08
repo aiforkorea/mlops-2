@@ -1,0 +1,233 @@
+# apps/mlops/views.py
+import os
+import numpy as np
+import pandas as pd
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import f1_score, make_scorer, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, cross_validate
+from apps import db
+from apps.dbmodels import Dataset, InferenceRecord, MLResult, ModelInfo, PreprocessingInfo, User
+from flask import current_app, json, render_template, flash, url_for, redirect, request
+from flask_login import login_user, logout_user
+from apps import mlops
+from apps.ml_utils import create_model, dump_model, load_model  # views.py import해서 라우팅 등록
+from . import mlops ## 추가
+from .forms import UploadForm
+# 1. 데이터 업로드
+@mlops.route('/', methods=['GET'])
+def index():
+    return render_template('mlops/base.html')
+@mlops.route('/upload', methods=['GET', 'POST'])
+def upload():
+    form = UploadForm()
+    if form.validate_on_submit():
+        file = request.files['file']
+        if file and file.filename.endswith('.csv'):
+            filepath = os.path.join(current_app.config['UPLOAD_DIR'], file.filename)
+            print(filepath)
+            file.save(filepath)
+            df = pd.read_csv(filepath)
+            ds = Dataset(filename=file.filename, data=json.loads(df.to_json(orient='records')))
+            db.session.add(ds)
+            db.session.commit()
+            flash("업로드 완료!")
+            return redirect(url_for('mlops.list_ml'))
+        else:
+            flash("CSV 파일만 업로드 가능합니다.")
+    return render_template('mlops/upload.html', form=form)
+# 2. 데이터 리스트
+@mlops.route('list', methods=['GET'])
+def list_ml():
+    datasets = Dataset.query.order_by(Dataset.id.desc()).all()
+    return render_template('mlops/list_ml.html', datasets=datasets)
+
+# 3. 데이터 전처리
+@mlops.route('/ml/preprocess/<int:dataset_id>', methods=['GET', 'POST'])
+def preprocess(dataset_id):
+    ds = Dataset.query.get(dataset_id)
+    df = pd.DataFrame(ds.data)
+    methods = ['mean','median']
+    if request.method == 'POST':
+        method = request.form['impute_method']
+        if method == 'mean':
+            df = df.fillna(df.mean(numeric_only=True))
+        elif method == 'median':
+            df = df.fillna(df.median(numeric_only=True))
+        processed = PreprocessingInfo(
+            dataset_id=ds.id,
+            preprocessing_steps={'impute': method},
+            processed_data=json.loads(df.to_json(orient='records'))
+        )
+        db.session.add(processed)
+        db.session.commit()
+        return redirect(url_for('mlops.select_features', preprocess_id=processed.id))
+    return render_template('mlops/preprocess.html', df=df.head(10).to_html(), methods=methods)
+
+# 4. 피처/타겟 선택
+@mlops.route('/ml/select_features/<int:preprocess_id>', methods=['GET','POST'])
+def select_features(preprocess_id):
+    preprocess = PreprocessingInfo.query.get(preprocess_id)
+    df = pd.DataFrame(preprocess.processed_data)
+    cols = df.columns.tolist()
+    if request.method == 'POST':
+        features = request.form.getlist('features')
+        target = request.form['target']
+        return redirect(url_for("mlops.train_model", preprocess_id=preprocess_id, features=",".join(features), target=target))
+    return render_template('mlops/select_features.html', columns=cols)
+
+# 5. 모델 추가(등록)
+@mlops.route('/ml/add_model', methods=['GET','POST'])
+def add_model():
+    model_types = ['RandomForest', 'LogisticRegression']
+    if request.method == 'POST':
+        name = request.form['name']
+        mtype = request.form['model_type']
+        model = create_model(mtype)
+        blob = dump_model(model)
+        mi = ModelInfo(name=name, model_type=mtype, model_blob=blob)
+        db.session.add(mi)
+        db.session.commit()
+        flash("모델이 등록되었습니다.")
+        return redirect(url_for('mlops.add_model'))
+    return render_template('mlops/add_model.html', model_types=model_types, models=ModelInfo.query.all())
+
+# 6. 모델 훈련, 교차검증, 성능평가
+@mlops.route('/ml/train/<int:preprocess_id>', methods=['GET', 'POST'])
+def train_model(preprocess_id):
+    features = request.args.get('features','').split(',')
+    target = request.args.get('target')
+    preprocess = PreprocessingInfo.query.get(preprocess_id)
+    ds = Dataset.query.get(preprocess.dataset_id)
+    df = pd.DataFrame(preprocess.processed_data)
+    X = df[features]
+    y = df[target]
+    models = ModelInfo.query.all()
+    metrics = None
+    selected_model_id = None
+    if request.method == 'POST':
+        selected_model_id = int(request.form['model_id'])
+        model_info = ModelInfo.query.get(selected_model_id)
+        model = load_model(model_info.model_blob)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        scorers = {
+            'accuracy': make_scorer(accuracy_score),
+            'precision': make_scorer(precision_score, average='weighted', zero_division=0),
+            'recall': make_scorer(recall_score, average='weighted', zero_division=0),
+            'f1': make_scorer(f1_score, average='weighted', zero_division=0),
+            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
+        }
+        try:
+            results = cross_validate(model, X, y, cv=cv, scoring=scorers)
+            metrics = {k.replace('test_',''):float(np.mean(v)) for k,v in results.items() if k.startswith('test_')}
+        except Exception as e:
+            flash(f"교차검증 중 오류: {e}")
+            metrics = None
+        # 학습 후 모델 저장
+        model.fit(X, y)
+        model_info.model_blob = dump_model(model)
+        db.session.commit()
+        # 결과 저장
+        ml_result = MLResult(
+            model_id=selected_model_id,
+            dataset_id=ds.id,
+            features=features,
+            target=target,
+            metrics=metrics
+        )
+        db.session.add(ml_result)
+        db.session.commit()
+    return render_template('mlops/train_model.html',
+        models=models, features=features, target=target, preprocess_id=preprocess_id, metrics=metrics)
+
+# 7. 추론 API (입력폼)
+@mlops.route('/ml/infer/<int:model_id>', methods=['GET','POST'])
+def model_infer(model_id):
+    model_info = ModelInfo.query.get(model_id)
+    # 마지막으로 평가한 MLResult에서 feature 정보 가져옴
+    last_result = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
+    if not last_result:
+        flash("모델에 사용된 피처 정보가 없습니다.")
+        return redirect(url_for('list_ml'))
+    input_cols = last_result.features
+    pred_result = None
+    inference_rec = None
+    if request.method == 'POST':
+        values = {col: request.form[col] for col in input_cols}
+        model = load_model(model_info.model_blob)
+        X = pd.DataFrame([values])
+        for col in input_cols:  # float 변환 시도
+            try: X[col] = X[col].astype(float)
+            except: pass
+        prediction = model.predict(X)[0]
+        pred_result = prediction
+        # 기록으로 저장
+        inference_rec = InferenceRecord(
+            model_id=model_info.id,
+            input_data=values,
+            output_data={'prediction':prediction}
+        )
+        db.session.add(inference_rec)
+        db.session.commit()
+    return render_template('mlops/inference.html',
+        input_cols=input_cols, pred_result=pred_result, inference_rec=inference_rec, model_id=model_id)
+
+# 8. 추론 피드백(정답 DB 저장)
+@mlops.route('/ml/confirm_inference/<int:inference_id>', methods=['POST'])
+def confirm_inference(inference_id):
+    rec = InferenceRecord.query.get(inference_id)
+    actual = request.form['actual']
+    rec.is_confirmed = True
+    rec.confirmed_data = {'actual': actual}
+    db.session.commit()
+    flash("정답이 저장되었습니다. 재학습 시 활용됩니다.")
+    return redirect(url_for('mlops.model_infer', model_id=rec.model_id))
+
+# 9. 추가된 데이터로 재학습 (활용)
+@mlops.route('/ml/retrain/<int:model_id>', methods=['GET','POST'])
+def retrain(model_id):
+    model_info = ModelInfo.query.get(model_id)
+    # 최근 MLResult에서 features, target 추출
+    last_result = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
+    if not last_result:
+        flash("이 모델에 학습된 결과정보가 없습니다! 학습 먼저 하세요.")
+        return redirect(url_for('mlops.add_model'))
+    features = last_result.features
+    target = last_result.target
+    # 추론 후 정답까지 입력된 레코드
+    recs = InferenceRecord.query.filter_by(model_id=model_id, is_confirmed=True).all()
+    retrain_report = None
+    if request.method == 'POST' and len(recs) > 0:
+        X_new = pd.DataFrame([r.input_data for r in recs])
+        y_new = [r.confirmed_data['actual'] for r in recs]
+        # 기존 학습 데이터도 추가(오리지널 데이터)
+        preprocess_id = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
+        mlr = MLResult.query.get(preprocess_id.id)
+        ds = Dataset.query.get(mlr.dataset_id)
+        orig_df = pd.DataFrame(ds.data)
+        orig_X = orig_df[features]
+        orig_y = orig_df[target]
+        X_total = pd.concat([orig_X,X_new],axis=0)
+        y_total = pd.concat([orig_y,pd.Series(y_new)],axis=0)
+        model = create_model(model_info.model_type)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        scorers = {
+            'accuracy': make_scorer(accuracy_score),
+            'precision': make_scorer(precision_score, average='weighted', zero_division=0),
+            'recall': make_scorer(recall_score, average='weighted', zero_division=0),
+            'f1': make_scorer(f1_score, average='weighted', zero_division=0),
+            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
+        }
+        try:
+            results = cross_validate(model, X_total, y_total, cv=cv, scoring=scorers)
+            metrics = {k.replace('test_',''):float(np.mean(v)) for k,v in results.items() if k.startswith('test_')}
+            model.fit(X_total, y_total)
+            model_info.model_blob = dump_model(model)
+            db.session.commit()
+            retrain_report = metrics
+        except Exception as e:
+            flash(f"재학습 중 오류: {e}")
+            retrain_report = None
+    else:
+        retrain_report = None
+    return render_template('mlops/train_model.html',
+        retrain_report=retrain_report, retrain_mode=True, model_id=model_id)

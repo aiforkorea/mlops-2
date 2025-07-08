@@ -1,0 +1,30 @@
+{# apps/mlops/templates/mlops/base.html #}
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <title>AI ML 분류 시스템</title>
+    <meta charset="utf-8">
+    <style>
+    a { margin-right:20px;}
+    table,th,td {border:1px solid #ccc; border-collapse:collapse;}
+    </style>
+</head>
+<body>
+    <nav>
+        <a href="{{ url_for('mlops.upload') }}">데이터 업로드</a>
+        <a href="{{ url_for('mlops.list_ml') }}">데이터 목록</a>
+        <a href="{{ url_for('mlops.add_model') }}">모델 등록/관리</a>
+    </nav>
+    <hr>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul style="color:red">
+        {% for msg in messages %}
+          <li>{{ msg }}</li>
+        {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+</body>
+</html>
