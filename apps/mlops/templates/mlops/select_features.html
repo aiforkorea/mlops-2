@@ -1,0 +1,18 @@
+{# apps/mlops/templates/mlops/select_features.html #}
+{% extends "base.html" %}
+{% block content %}
+<h2>피처/타겟 선택</h2>
+<form method="post">
+    {{ form.hidden_tag() }}
+    <div>
+        <strong>피처(Feature):</strong><br>
+        {{ form.features() }}
+        {# 여러개 체크박스로 그려짐, 위젯 덕분에... #}
+    </div>
+    <div>
+        <strong>타겟(Target):</strong><br>
+        {{ form.target() }}
+    </div>
+    {{ form.submit() }}
+</form>
+{% endblock %}

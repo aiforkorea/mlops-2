@@ -1,0 +1,38 @@
+{# apps/mlops/templates/mlops/train_model.html #}
+{% extends "base.html" %}
+{% block content %}
+{% if not retrain_mode %}
+<h2>모델 학습 및 성능 평가</h2>
+<form method="post">
+    <div>
+        사용 모델:
+        <select name="model_id">
+            {% for m in models %}
+                <option value="{{ m.id }}">{{ m.name }} ({{ m.model_type }})</option>
+            {% endfor %}
+        </select>
+        <button type="submit">교차검증 및 학습</button>
+    </div>
+</form>
+{% endif %}
+{% if metrics %}
+    <h3>성능</h3>
+    <table>
+    {% for k,v in metrics.items() %}
+        <tr><td>{{k}}</td><td>{{ '%.4f'|format(v) }}</td></tr>
+    {% endfor %}
+    </table>
+{% endif %}
+{% if retrain_report %}
+    <h3>재학습 결과 성능</h3>
+    <table>
+    {% for k,v in retrain_report.items() %}
+        <tr><td>{{k}}</td><td>{{ '%.4f'|format(v) }}</td></tr>
+    {% endfor %}
+    </table>
+{% elif retrain_mode %}
+    <form method="post">
+        <button type="submit">재학습 시작(추론+정답 입력된 데이터 활용)</button>
+    </form>
+{% endif %}
+{% endblock %}

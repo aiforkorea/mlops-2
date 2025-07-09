@@ -1,0 +1,18 @@
+{# apps/mlops/templates/mlops/inference.html #}
+{% extends "base.html" %}
+{% block content %}
+<h2>추론 테스트</h2>
+<form method="post">
+    {% for col in input_cols %}
+        {{ col }}: <input type="text" name="{{ col }}"><br>
+    {% endfor %}
+    <button type="submit">예측</button>
+</form>
+{% if pred_result is not none %}
+    <h3>결과: {{ pred_result }}</h3>
+    <form method="post" action="{{ url_for('confirm_inference', inference_id=inference_rec.id) }}">
+        <label>정답(실제): <input type="text" name="actual" required></label>
+        <button type="submit">정답 저장(피드백)</button>
+    </form>
+{% endif %}
+{% endblock %}

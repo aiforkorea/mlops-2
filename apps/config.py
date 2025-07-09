@@ -23,7 +23,8 @@ class Config:
     ADMIN_USERNAME = os.getenv('ADMIN_USERNAME')    
     ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')    
     ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
-    API_KEY_LENGTH = int(os.getenv('API_KEY_LENGTH'))
+    #API_KEY_LENGTH = int(os.getenv('API_KEY_LENGTH'))
+    API_KEY_LENGTH = os.getenv('API_KEY_LENGTH')
     #
     UPLOAD_DIR = os.path.join(BASE_DIR, '..', 'uploads')
     if not os.path.exists(UPLOAD_DIR):

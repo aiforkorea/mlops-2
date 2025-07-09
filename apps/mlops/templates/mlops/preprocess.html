@@ -1,0 +1,15 @@
+{# apps/mlops/templates/mlops/preprocess.html #}
+{% extends "base.html" %}
+{% block content %}
+<h2>전처리 (결측치 보정)</h2>
+<h4>미리보기</h4>
+{{ df|safe }}
+<form method="post">
+    {{ form.csrf_token }} {# CSRF 토큰 렌더링 #}
+    결측치 보정 방법:
+    <select name="impute_method">
+        {% for m in methods %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+    </select>
+    <button type="submit">적용</button>
+</form>
+{% endblock %}

@@ -12,7 +12,7 @@ from flask_login import login_user, logout_user
 from apps import mlops
 from apps.ml_utils import create_model, dump_model, load_model  # views.py import해서 라우팅 등록
 from . import mlops ## 추가
-from .forms import UploadForm
+from .forms import AddModelForm, FeatureTargetForm, UploadForm, ImputeForm
 # 1. 데이터 업로드
 @mlops.route('/', methods=['GET'])
 def index():
@@ -42,13 +42,16 @@ def list_ml():
     return render_template('mlops/list_ml.html', datasets=datasets)
 
 # 3. 데이터 전처리
-@mlops.route('/ml/preprocess/<int:dataset_id>', methods=['GET', 'POST'])
+@mlops.route('/preprocess/<int:dataset_id>', methods=['GET', 'POST'])
 def preprocess(dataset_id):
     ds = Dataset.query.get(dataset_id)
     df = pd.DataFrame(ds.data)
     methods = ['mean','median']
-    if request.method == 'POST':
-        method = request.form['impute_method']
+    form = ImputeForm()
+    form.impute_method.choices = [(m, m) for m in methods]  # (value, label) 튜플 리스트로 할당
+
+    if form.validate_on_submit():
+        method = form.impute_method.data
         if method == 'mean':
             df = df.fillna(df.mean(numeric_only=True))
         elif method == 'median':
@@ -61,27 +64,40 @@ def preprocess(dataset_id):
         db.session.add(processed)
         db.session.commit()
         return redirect(url_for('mlops.select_features', preprocess_id=processed.id))
-    return render_template('mlops/preprocess.html', df=df.head(10).to_html(), methods=methods)
+    return render_template('mlops/preprocess.html', df=df.head(10).to_html(), methods=methods, form=form)
 
 # 4. 피처/타겟 선택
-@mlops.route('/ml/select_features/<int:preprocess_id>', methods=['GET','POST'])
+
+@mlops.route('/select_features/<int:preprocess_id>', methods=['GET','POST'])
 def select_features(preprocess_id):
     preprocess = PreprocessingInfo.query.get(preprocess_id)
     df = pd.DataFrame(preprocess.processed_data)
     cols = df.columns.tolist()
-    if request.method == 'POST':
-        features = request.form.getlist('features')
-        target = request.form['target']
-        return redirect(url_for("mlops.train_model", preprocess_id=preprocess_id, features=",".join(features), target=target))
-    return render_template('mlops/select_features.html', columns=cols)
+
+    form = FeatureTargetForm()
+    # choices 갱신 (value, label) 튜플로 넣어줘야 함
+    form.features.choices = [(c, c) for c in cols]
+    form.target.choices = [(c, c) for c in cols]
+
+    if form.validate_on_submit():
+        features = form.features.data  # list 반환
+        target = form.target.data      # str 반환
+        return redirect(url_for("mlops.train_model", 
+                               preprocess_id=preprocess_id, 
+                               features=",".join(features), 
+                               target=target))
+    return render_template('mlops/select_features.html', form=form)
 
 # 5. 모델 추가(등록)
-@mlops.route('/ml/add_model', methods=['GET','POST'])
+@mlops.route('/add_model', methods=['GET','POST'])
 def add_model():
     model_types = ['RandomForest', 'LogisticRegression']
-    if request.method == 'POST':
-        name = request.form['name']
-        mtype = request.form['model_type']
+    form = AddModelForm()
+    form.model_type.choices = [(mt, mt) for mt in model_types]
+
+    if form.validate_on_submit():
+        name = form.name.data
+        mtype = form.model_type.data
         model = create_model(mtype)
         blob = dump_model(model)
         mi = ModelInfo(name=name, model_type=mtype, model_blob=blob)
@@ -89,10 +105,10 @@ def add_model():
         db.session.commit()
         flash("모델이 등록되었습니다.")
         return redirect(url_for('mlops.add_model'))
-    return render_template('mlops/add_model.html', model_types=model_types, models=ModelInfo.query.all())
+    return render_template('mlops/add_model.html', form=form, models=ModelInfo.query.all())
 
 # 6. 모델 훈련, 교차검증, 성능평가
-@mlops.route('/ml/train/<int:preprocess_id>', methods=['GET', 'POST'])
+@mlops.route('/train/<int:preprocess_id>', methods=['GET', 'POST'])
 def train_model(preprocess_id):
     features = request.args.get('features','').split(',')
     target = request.args.get('target')
@@ -140,7 +156,7 @@ def train_model(preprocess_id):
         models=models, features=features, target=target, preprocess_id=preprocess_id, metrics=metrics)
 
 # 7. 추론 API (입력폼)
-@mlops.route('/ml/infer/<int:model_id>', methods=['GET','POST'])
+@mlops.route('infer/<int:model_id>', methods=['GET','POST'])
 def model_infer(model_id):
     model_info = ModelInfo.query.get(model_id)
     # 마지막으로 평가한 MLResult에서 feature 정보 가져옴
@@ -172,7 +188,7 @@ def model_infer(model_id):
         input_cols=input_cols, pred_result=pred_result, inference_rec=inference_rec, model_id=model_id)
 
 # 8. 추론 피드백(정답 DB 저장)
-@mlops.route('/ml/confirm_inference/<int:inference_id>', methods=['POST'])
+@mlops.route('confirm_inference/<int:inference_id>', methods=['POST'])
 def confirm_inference(inference_id):
     rec = InferenceRecord.query.get(inference_id)
     actual = request.form['actual']
@@ -183,7 +199,7 @@ def confirm_inference(inference_id):
     return redirect(url_for('mlops.model_infer', model_id=rec.model_id))
 
 # 9. 추가된 데이터로 재학습 (활용)
-@mlops.route('/ml/retrain/<int:model_id>', methods=['GET','POST'])
+@mlops.route('/retrain/<int:model_id>', methods=['GET','POST'])
 def retrain(model_id):
     model_info = ModelInfo.query.get(model_id)
     # 최근 MLResult에서 features, target 추출
