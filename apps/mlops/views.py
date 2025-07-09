@@ -2,6 +2,7 @@
 import os
 import numpy as np
 import pandas as pd
+from sklearn.calibration import LabelEncoder, cross_val_predict
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import f1_score, make_scorer, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_validate
@@ -129,6 +130,7 @@ def add_model():
     return render_template('mlops/add_model.html', form=form, models=ModelInfo.query.all())
 
 # 6. 모델 훈련, 교차검증, 성능평가
+
 @mlops.route('/train/<int:preprocess_id>', methods=['GET', 'POST'])
 def train_model(preprocess_id):
     features = request.args.get('features', '').split(',')
@@ -137,12 +139,12 @@ def train_model(preprocess_id):
 
     if not preprocess:
         flash("전처리 정보를 찾을 수 없습니다.")
-        return redirect(url_for('some_error_route')) # Redirect to an appropriate error page
+        return redirect(url_for('some_error_route'))
 
     ds = Dataset.query.get(preprocess.dataset_id)
     if not ds:
         flash("데이터셋을 찾을 수 없습니다.")
-        return redirect(url_for('some_error_route')) # Redirect to an appropriate error page
+        return redirect(url_for('some_error_route'))
 
     df = pd.DataFrame(preprocess.processed_data)
     X = df[features]
@@ -152,42 +154,62 @@ def train_model(preprocess_id):
     metrics = None
     selected_model_id = None
 
-    # Populate the form's model_id choices
+    # 폼 객체 및 모델 선택 리스트
     form = TrainModelForm()
     form.model_id.choices = [(m.id, f"{m.name} ({m.model_type})") for m in models]
 
-    if form.validate_on_submit(): # Use form.validate_on_submit() for POST requests
+    if form.validate_on_submit():
         selected_model_id = form.model_id.data
         model_info = ModelInfo.query.get(selected_model_id)
 
         if not model_info:
             flash("선택된 모델 정보를 찾을 수 없습니다.")
-            return redirect(url_for('mlops.train_model', preprocess_id=preprocess_id, features=','.join(features), target=target))
+            return redirect(
+                url_for('mlops.train_model', preprocess_id=preprocess_id, features=','.join(features), target=target)
+            )
 
         model = load_model(model_info.model_blob)
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+        # 기본 평가지표
         scorers = {
             'accuracy': make_scorer(accuracy_score),
             'precision': make_scorer(precision_score, average='weighted', zero_division=0),
             'recall': make_scorer(recall_score, average='weighted', zero_division=0),
             'f1': make_scorer(f1_score, average='weighted', zero_division=0),
-            #'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
-            # If y is multi-class and you want 'weighted' average ROC AUC
-            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr', average='weighted')
         }
-        print("scorers")
-        print(scorers) 
-        try:
-            results = cross_validate(model, X, y, cv=cv, scoring=scorers)
-            metrics = {k.replace('test_', ''): float(np.mean(v)) for k, v in results.items() if k.startswith('test_')}
-        except Exception as e:
-            flash(f"교차검증 중 오류: {e}")
-            metrics = None
-        print("metrics")
-        print(metrics)
 
-        if metrics: # Only proceed with fitting and saving if cross-validation was successful
-            # 학습 후 모델 저장
+        try:
+            # cross_validate (roc_auc는 별도 아래에서 추가)
+            results = cross_validate(model, X, y, cv=cv, scoring=scorers)
+            metrics = {
+                k.replace('test_', ''): float(np.mean(v))
+                for k, v in results.items() if k.startswith('test_')
+            }
+
+            # === ROC AUC 별도 계산 ===
+            # 1) y가 문자열이면 정수 인코딩
+            y_np = np.array(y)
+            if y_np.dtype.kind in 'OUS':  # 문자열, object, category
+                encoder = LabelEncoder()
+                y_enc = encoder.fit_transform(y_np)
+            else:
+                y_enc = y_np
+            # 2) 확률 예측값 얻기
+            y_proba = cross_val_predict(model, X, y_enc, cv=cv, method='predict_proba')
+            n_classes = len(np.unique(y_enc))
+            # 3) roc_auc_score 계산
+            if n_classes > 2:
+                roc_auc = roc_auc_score(y_enc, y_proba, average='weighted', multi_class='ovr')
+            else:
+                roc_auc = roc_auc_score(y_enc, y_proba[:, 1])
+            metrics['roc_auc'] = float(roc_auc)
+        except Exception as e:
+            flash(f"모델 평가 중 오류: {e}")
+            metrics = None
+
+        if metrics:
+            # 최종 전체 데이터로 fit 후 저장
             model.fit(X, y)
             model_info.model_blob = dump_model(model)
             db.session.commit()
@@ -205,13 +227,15 @@ def train_model(preprocess_id):
             db.session.commit()
             flash("모델 학습 결과가 저장되었습니다.")
 
-    return render_template('mlops/train_model.html',
-                           form=form, # Pass the form to the template
-                           models=models,
-                           features=features,
-                           target=target,
-                           preprocess_id=preprocess_id,
-                           metrics=metrics)
+    return render_template(
+        'mlops/train_model.html',
+        form=form,
+        models=models,
+        features=features,
+        target=target,
+        preprocess_id=preprocess_id,
+        metrics=metrics
+    )
 
 # 7. 추론 API (입력폼)
 @mlops.route('infer/<int:model_id>', methods=['GET','POST'])
