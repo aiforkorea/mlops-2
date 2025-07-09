@@ -1,25 +1,57 @@
 {# apps/mlops/templates/mlops/add_model.html #}
-{% extends "base.html" %}
+{% extends "mlops/base.html" %}
 {% block content %}
 <h2>모델 등록/관리</h2>
-<form method="post">
-    {{ form.hidden_tag() }}
-    {{ form.name.label }}: {{ form.name(size=20) }}
-    {{ form.model_type.label }}: {{ form.model_type() }}
-    {{ form.submit() }}
+
+{# Render the form using WTForms #}
+<form method="POST" novalidate>
+    {{ form.csrf_token }} {# Essential for security #}
+    <div class="form-group">
+        {{ form.name.label }}
+        {{ form.name(class="form-control", size=30) }}
+        {% for error in form.name.errors %}
+            <span style="color: red;">[{{ error }}]</span>
+        {% endfor %}
+    </div>
+    <div class="form-group">
+        {{ form.model_type.label }}
+        {{ form.model_type(class="form-control") }}
+        {% for error in form.model_type.errors %}
+            <span style="color: red;">[{{ error }}]</span>
+        {% endfor %}
+    </div>
+    {{ form.submit(class="btn btn-primary") }}
 </form>
+
+<hr>
 <h4>등록된 모델 목록</h4>
 <table>
-<tr><th>ID</th><th>이름</th><th>타입</th><th>등록일자</th><th>추론</th><th>재학습</th></tr>
-{% for m in models %}
-<tr>
-    <td>{{ m.id }}</td>
-    <td>{{ m.name }}</td>
-    <td>{{ m.model_type }}</td>
-    <td>{{ m.created_at }}</td>
-    <td><a href="{{ url_for('model_infer', model_id=m.id) }}">추론/테스트</a></td>
-    <td><a href="{{ url_for('retrain', model_id=m.id) }}">재학습</a></td>
-</tr>
-{% endfor %}
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>이름</th>
+            <th>타입</th>
+            <th>등록일자</th>
+            <th>추론</th>
+            <th>재학습</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for m in models %}
+        <tr>
+            <td>{{ m.id }}</td>
+            <td>{{ m.name }}</td>
+            <td>{{ m.model_type }}</td>
+            {# Format datetime for better readability #}
+            <td>{{ m.created_at.strftime('%Y-%m-%d %H:%M') }}</td> 
+            <td><a href="{{ url_for('mlops.model_infer', model_id=m.id) }}">추론/테스트</a></td>
+            <td><a href="{{ url_for('mlops.retrain', model_id=m.id) }}">재학습</a></td>
+        </tr>
+        {% else %}
+        <tr>
+            <td colspan="6" style="text-align: center;">등록된 모델이 없습니다.</td>
+        </tr>
+        {% endfor %}
+    </tbody>
 </table>
 {% endblock %}

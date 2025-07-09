@@ -1,8 +1,9 @@
 {# apps/mlops/templates/mlops/inference.html #}
-{% extends "base.html" %}
+{% extends "mlops/base.html" %}
 {% block content %}
 <h2>추론 테스트</h2>
 <form method="post">
+    {{ form.csrf_token }} {# Essential for security #}
     {% for col in input_cols %}
         {{ col }}: <input type="text" name="{{ col }}"><br>
     {% endfor %}

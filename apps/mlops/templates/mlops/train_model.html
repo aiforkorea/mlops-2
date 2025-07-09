@@ -1,17 +1,14 @@
 {# apps/mlops/templates/mlops/train_model.html #}
-{% extends "base.html" %}
+{% extends "mlops/base.html" %}
 {% block content %}
 {% if not retrain_mode %}
 <h2>모델 학습 및 성능 평가</h2>
 <form method="post">
+    {{ form.csrf_token }} {# Essential for security #}
     <div>
-        사용 모델:
-        <select name="model_id">
-            {% for m in models %}
-                <option value="{{ m.id }}">{{ m.name }} ({{ m.model_type }})</option>
-            {% endfor %}
-        </select>
-        <button type="submit">교차검증 및 학습</button>
+        {{ form.model_id.label }}:
+        {{ form.model_id }}
+        {{ form.submit }}
     </div>
 </form>
 {% endif %}

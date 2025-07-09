@@ -2,17 +2,18 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>피처/타겟 선택</h2>
-<form method="post">
-    {{ form.hidden_tag() }}
+<form method="post" novalidate>
+    {{ form.csrf_token }}
     <div>
-        <strong>피처(Feature):</strong><br>
+        <strong>{{ form.features.label }}</strong><br>
         {{ form.features() }}
-        {# 여러개 체크박스로 그려짐, 위젯 덕분에... #}
     </div>
+    <hr>
     <div>
-        <strong>타겟(Target):</strong><br>
+        <strong>{{ form.target.label }}</strong><br>
         {{ form.target() }}
     </div>
+    <hr>
     {{ form.submit() }}
 </form>
 {% endblock %}

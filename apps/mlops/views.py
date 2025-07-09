@@ -12,7 +12,7 @@ from flask_login import login_user, logout_user
 from apps import mlops
 from apps.ml_utils import create_model, dump_model, load_model  # views.py import해서 라우팅 등록
 from . import mlops ## 추가
-from .forms import AddModelForm, FeatureTargetForm, UploadForm, ImputeForm
+from .forms import AddModelForm, FeatureSelectionForm, FeatureTargetForm, TrainModelForm, UploadForm, ImputeForm
 # 1. 데이터 업로드
 @mlops.route('/', methods=['GET'])
 def index():
@@ -67,26 +67,47 @@ def preprocess(dataset_id):
     return render_template('mlops/preprocess.html', df=df.head(10).to_html(), methods=methods, form=form)
 
 # 4. 피처/타겟 선택
+@mlops.route('/select_features/<int:preprocess_id>', methods=['GET', 'POST'])
+def select_features(preprocess_id):
+    preprocess = PreprocessingInfo.query.get_or_404(preprocess_id)
+    df = pd.DataFrame(preprocess.processed_data)
+    cols = df.columns.tolist()
 
-@mlops.route('/select_features/<int:preprocess_id>', methods=['GET','POST'])
+    form = FeatureSelectionForm()
+    form.features.choices = [(col, col) for col in cols]
+    form.target.choices = [(col, col) for col in cols]
+
+    if form.validate_on_submit():
+        features = form.features.data
+        target = form.target.data
+        # Ensure the target is not included in the features
+        if target in features:
+            features.remove(target)
+        if not features or not target:
+            flash("피처와 타겟을 모두 선택해야 합니다.")
+            return redirect(url_for('mlops.select_features', preprocess_id=preprocess_id))            
+        print(features)
+        print(target)
+        return redirect(url_for(
+            "mlops.train_model", 
+            preprocess_id=preprocess_id, 
+            features=",".join(features), 
+            target=target
+        ))
+    return render_template('mlops/select_features.html', form=form)
+
+"""
+#@mlops.route('/select_features/<int:preprocess_id>', methods=['GET','POST'])
 def select_features(preprocess_id):
     preprocess = PreprocessingInfo.query.get(preprocess_id)
     df = pd.DataFrame(preprocess.processed_data)
     cols = df.columns.tolist()
-
-    form = FeatureTargetForm()
-    # choices 갱신 (value, label) 튜플로 넣어줘야 함
-    form.features.choices = [(c, c) for c in cols]
-    form.target.choices = [(c, c) for c in cols]
-
-    if form.validate_on_submit():
-        features = form.features.data  # list 반환
-        target = form.target.data      # str 반환
-        return redirect(url_for("mlops.train_model", 
-                               preprocess_id=preprocess_id, 
-                               features=",".join(features), 
-                               target=target))
-    return render_template('mlops/select_features.html', form=form)
+    if request.method == 'POST':
+        features = request.form.getlist('features')
+        target = request.form['target']
+        return redirect(url_for("train_model", preprocess_id=preprocess_id, features=",".join(features), target=target))
+    return render_template('select_features.html', columns=cols)
+"""
 
 # 5. 모델 추가(등록)
 @mlops.route('/add_model', methods=['GET','POST'])
@@ -110,19 +131,39 @@ def add_model():
 # 6. 모델 훈련, 교차검증, 성능평가
 @mlops.route('/train/<int:preprocess_id>', methods=['GET', 'POST'])
 def train_model(preprocess_id):
-    features = request.args.get('features','').split(',')
+    features = request.args.get('features', '').split(',')
     target = request.args.get('target')
     preprocess = PreprocessingInfo.query.get(preprocess_id)
+
+    if not preprocess:
+        flash("전처리 정보를 찾을 수 없습니다.")
+        return redirect(url_for('some_error_route')) # Redirect to an appropriate error page
+
     ds = Dataset.query.get(preprocess.dataset_id)
+    if not ds:
+        flash("데이터셋을 찾을 수 없습니다.")
+        return redirect(url_for('some_error_route')) # Redirect to an appropriate error page
+
     df = pd.DataFrame(preprocess.processed_data)
     X = df[features]
     y = df[target]
+
     models = ModelInfo.query.all()
     metrics = None
     selected_model_id = None
-    if request.method == 'POST':
-        selected_model_id = int(request.form['model_id'])
+
+    # Populate the form's model_id choices
+    form = TrainModelForm()
+    form.model_id.choices = [(m.id, f"{m.name} ({m.model_type})") for m in models]
+
+    if form.validate_on_submit(): # Use form.validate_on_submit() for POST requests
+        selected_model_id = form.model_id.data
         model_info = ModelInfo.query.get(selected_model_id)
+
+        if not model_info:
+            flash("선택된 모델 정보를 찾을 수 없습니다.")
+            return redirect(url_for('mlops.train_model', preprocess_id=preprocess_id, features=','.join(features), target=target))
+
         model = load_model(model_info.model_blob)
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         scorers = {
@@ -130,30 +171,47 @@ def train_model(preprocess_id):
             'precision': make_scorer(precision_score, average='weighted', zero_division=0),
             'recall': make_scorer(recall_score, average='weighted', zero_division=0),
             'f1': make_scorer(f1_score, average='weighted', zero_division=0),
-            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
+            #'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
+            # If y is multi-class and you want 'weighted' average ROC AUC
+            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr', average='weighted')
         }
+        print("scorers")
+        print(scorers) 
         try:
             results = cross_validate(model, X, y, cv=cv, scoring=scorers)
-            metrics = {k.replace('test_',''):float(np.mean(v)) for k,v in results.items() if k.startswith('test_')}
+            metrics = {k.replace('test_', ''): float(np.mean(v)) for k, v in results.items() if k.startswith('test_')}
         except Exception as e:
             flash(f"교차검증 중 오류: {e}")
             metrics = None
-        # 학습 후 모델 저장
-        model.fit(X, y)
-        model_info.model_blob = dump_model(model)
-        db.session.commit()
-        # 결과 저장
-        ml_result = MLResult(
-            model_id=selected_model_id,
-            dataset_id=ds.id,
-            features=features,
-            target=target,
-            metrics=metrics
-        )
-        db.session.add(ml_result)
-        db.session.commit()
+        print("metrics")
+        print(metrics)
+
+        if metrics: # Only proceed with fitting and saving if cross-validation was successful
+            # 학습 후 모델 저장
+            model.fit(X, y)
+            model_info.model_blob = dump_model(model)
+            db.session.commit()
+            flash("모델 학습 및 저장이 완료되었습니다.")
+
+            # 결과 저장
+            ml_result = MLResult(
+                model_id=selected_model_id,
+                dataset_id=ds.id,
+                features=features,
+                target=target,
+                metrics=metrics
+            )
+            db.session.add(ml_result)
+            db.session.commit()
+            flash("모델 학습 결과가 저장되었습니다.")
+
     return render_template('mlops/train_model.html',
-        models=models, features=features, target=target, preprocess_id=preprocess_id, metrics=metrics)
+                           form=form, # Pass the form to the template
+                           models=models,
+                           features=features,
+                           target=target,
+                           preprocess_id=preprocess_id,
+                           metrics=metrics)
 
 # 7. 추론 API (입력폼)
 @mlops.route('infer/<int:model_id>', methods=['GET','POST'])
@@ -163,7 +221,7 @@ def model_infer(model_id):
     last_result = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
     if not last_result:
         flash("모델에 사용된 피처 정보가 없습니다.")
-        return redirect(url_for('list_ml'))
+        return redirect(url_for('mlops.list_ml'))
     input_cols = last_result.features
     pred_result = None
     inference_rec = None

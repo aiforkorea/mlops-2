@@ -27,7 +27,32 @@ class FeatureTargetForm(FlaskForm):
     target = SelectField('타겟(Target)', choices=[], validators=[DataRequired()])
     submit = SubmitField('다음 (모델학습)')
 
+class FeatureSelectionForm(FlaskForm):
+    features = SelectMultipleField(
+        '피처(Feature)',
+        widget=ListWidget(prefix_label=False),
+        option_widget=CheckboxInput()
+    )
+    target = SelectField('타겟(Target)')
+    submit = SubmitField('다음 (모델학습)')
+
 class AddModelForm(FlaskForm):
-    name = StringField('이름', validators=[DataRequired()])
-    model_type = SelectField('종류', choices=[], validators=[DataRequired()])
+    """Form for adding a new machine learning model."""
+    name = StringField(
+        '이름', 
+        validators=[DataRequired(message="모델 이름은 필수입니다.")]
+    )
+    model_type = SelectField('종류', validators=[DataRequired()])
     submit = SubmitField('등록')
+
+class TrainModelForm(FlaskForm):
+    """Form for selecting a model to train."""
+    model_id = SelectField(
+        '사용 모델',
+        validators=[DataRequired()],
+        coerce=int
+    )
+    submit = SubmitField('교차검증 및 학습')
+
+
+    
