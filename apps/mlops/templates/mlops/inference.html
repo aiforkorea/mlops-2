@@ -4,14 +4,27 @@
 <h2>추론 테스트</h2>
 <form method="post">
     {{ form.csrf_token }} {# Essential for security #}
+
     {% for col in input_cols %}
-        {{ col }}: <input type="text" name="{{ col }}"><br>
+        <div>
+            {{ form[col].label }}: {{ form[col](class_="form-control") }}
+            {% if form[col].errors %}
+                <ul class="errors">
+                    {% for error in form[col].errors %}
+                        <li>{{ error }}</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        </div>
     {% endfor %}
-    <button type="submit">예측</button>
+
+    {{ form.submit(class_="btn btn-primary") }} {# Render the submit button #}
 </form>
+
 {% if pred_result is not none %}
     <h3>결과: {{ pred_result }}</h3>
-    <form method="post" action="{{ url_for('confirm_inference', inference_id=inference_rec.id) }}">
+    <form method="post" action="{{ url_for('mlops.confirm_inference', inference_id=inference_rec.id) }}">
+        {{ form.csrf_token }} {# Essential for security #}
         <label>정답(실제): <input type="text" name="actual" required></label>
         <button type="submit">정답 저장(피드백)</button>
     </form>

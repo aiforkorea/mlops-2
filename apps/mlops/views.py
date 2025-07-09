@@ -13,7 +13,7 @@ from flask_login import login_user, logout_user
 from apps import mlops
 from apps.ml_utils import create_model, dump_model, load_model  # views.py import해서 라우팅 등록
 from . import mlops ## 추가
-from .forms import AddModelForm, FeatureSelectionForm, FeatureTargetForm, TrainModelForm, UploadForm, ImputeForm
+from .forms import AddModelForm, FeatureSelectionForm, FeatureTargetForm, RetrainForm, TrainModelForm, UploadForm, ImputeForm, create_inference_form
 # 1. 데이터 업로드
 @mlops.route('/', methods=['GET'])
 def index():
@@ -241,24 +241,63 @@ def train_model(preprocess_id):
 @mlops.route('infer/<int:model_id>', methods=['GET','POST'])
 def model_infer(model_id):
     model_info = ModelInfo.query.get(model_id)
-    # 마지막으로 평가한 MLResult에서 feature 정보 가져옴
     last_result = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
+
     if not last_result:
         flash("모델에 사용된 피처 정보가 없습니다.")
         return redirect(url_for('mlops.list_ml'))
+
     input_cols = last_result.features
+
+    # Create the form instance
+    InferenceForm = create_inference_form(input_cols)
+    form = InferenceForm()
+
     pred_result = None
     inference_rec = None
-    if request.method == 'POST':
-        values = {col: request.form[col] for col in input_cols}
+
+    if form.validate_on_submit(): # WTForms handles POST and validation
+        values = {col: request.form[col] for col in input_cols} # Or use form.data for cleaned data if fields are typed
         model = load_model(model_info.model_blob)
         X = pd.DataFrame([values])
-        for col in input_cols:  # float 변환 시도
-            try: X[col] = X[col].astype(float)
-            except: pass
+        for col in input_cols:
+            try:
+                X[col] = X[col].astype(float)
+            except ValueError:
+                # Handle cases where conversion to float fails (e.g., non-numeric input)
+                flash(f"'{col}' 값은 유효한 숫자가 아닙니다. 다시 확인해주세요.", "error")
+                return render_template('mlops/inference.html',
+                                       form=form, # Pass the form back to re-render
+                                       input_cols=input_cols,
+                                       pred_result=pred_result,
+                                       inference_rec=inference_rec,
+                                       model_id=model_id)
+
         prediction = model.predict(X)[0]
+
+        # --- 이 부분에 변경 사항 추가 ---
+        # prediction 값을 표준 파이썬 int 또는 float로 변환합니다.
+        if isinstance(prediction, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64,
+                                   np.uint8, np.uint16, np.uint32, np.uint64)):
+            prediction = int(prediction)
+        elif isinstance(prediction, (np.float_, np.float16, np.float32, np.float64)):
+            prediction = float(prediction)
+        # 만약 예측 결과가 리스트/배열 형태이고 그 안에 NumPy 타입이 있다면, 리스트 내의 모든 요소를 변환해야 합니다.
+        elif isinstance(prediction, np.ndarray):
+            prediction = prediction.tolist() # NumPy 배열을 파이썬 리스트로 변환
+
+            # 만약 리스트 안에 NumPy 타입이 남아있다면, 리스트 컴프리헨션으로 처리
+            if prediction and any(isinstance(x, (np.generic)) for x in prediction):
+                prediction = [
+                    int(x) if isinstance(x, (np.int_, np.integer)) else
+                    float(x) if isinstance(x, (np.float_, np.floating)) else x
+                    for x in prediction
+                ]
+
+        # --- 변경 사항 끝 ---
+        
         pred_result = prediction
-        # 기록으로 저장
+
         inference_rec = InferenceRecord(
             model_id=model_info.id,
             input_data=values,
@@ -266,8 +305,13 @@ def model_infer(model_id):
         )
         db.session.add(inference_rec)
         db.session.commit()
+
     return render_template('mlops/inference.html',
-        input_cols=input_cols, pred_result=pred_result, inference_rec=inference_rec, model_id=model_id)
+                           form=form, # Pass the form to the template
+                           input_cols=input_cols,
+                           pred_result=pred_result,
+                           inference_rec=inference_rec,
+                           model_id=model_id)
 
 # 8. 추론 피드백(정답 DB 저장)
 @mlops.route('confirm_inference/<int:inference_id>', methods=['POST'])
@@ -281,31 +325,90 @@ def confirm_inference(inference_id):
     return redirect(url_for('mlops.model_infer', model_id=rec.model_id))
 
 # 9. 추가된 데이터로 재학습 (활용)
+
 @mlops.route('/retrain/<int:model_id>', methods=['GET','POST'])
 def retrain(model_id):
     model_info = ModelInfo.query.get(model_id)
     # 최근 MLResult에서 features, target 추출
     last_result = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
+
+    # 폼 인스턴스 생성
+    form = RetrainForm() # RetrainForm 인스턴스 생성
+
     if not last_result:
-        flash("이 모델에 학습된 결과정보가 없습니다! 학습 먼저 하세요.")
+        flash("이 모델에 학습된 결과정보가 없습니다! 학습 먼저 하세요.", "warning") # 메시지 중요도
+        # 폼이 없으므로, flash만 하고 바로 리다이렉트
         return redirect(url_for('mlops.add_model'))
+
     features = last_result.features
     target = last_result.target
+
     # 추론 후 정답까지 입력된 레코드
     recs = InferenceRecord.query.filter_by(model_id=model_id, is_confirmed=True).all()
     retrain_report = None
-    if request.method == 'POST' and len(recs) > 0:
-        X_new = pd.DataFrame([r.input_data for r in recs])
-        y_new = [r.confirmed_data['actual'] for r in recs]
+
+    # POST 요청이고, 폼이 유효하며, 추가된 데이터가 있을 경우에만 재학습 진행
+    if form.validate_on_submit() and len(recs) > 0:
+        # X_new의 데이터 타입을 확인하고, 필요한 경우 숫자로 변환
+        # input_data는 딕셔너리 형태이므로 DataFrame 생성 시 주의
+        X_new_raw = [r.input_data for r in recs]
+        X_new = pd.DataFrame(X_new_raw)
+
+        # 모든 피처가 숫자로 변환 가능한지 확인하고 변환 (inference.py와 동일하게)
+        for col in features: # features를 기준으로 변환
+            if col in X_new.columns:
+                try:
+                    X_new[col] = X_new[col].astype(float)
+                except ValueError:
+                    flash(f"추가된 데이터의 '{col}' 컬럼에 유효하지 않은 값이 있어 재학습을 중단합니다.", "error")
+                    return render_template('mlops/train_model.html',
+                                           form=form, # 폼을 다시 전달
+                                           retrain_report=None,
+                                           retrain_mode=True,
+                                           model_id=model_id)
+            else:
+                # 만약 새로운 데이터에 원래 피처가 없다면, 0 또는 NaN으로 채울 수 있습니다.
+                # 이는 데이터 전처리 전략에 따라 달라질 수 있습니다.
+                X_new[col] = 0 # 예시: 없는 피처는 0으로 채움
+                # flash(f"경고: 추가된 데이터에 '{col}' 피처가 없습니다. 0으로 처리됩니다.", "warning")
+
+        # y_new도 적절한 타입으로 변환 (숫자형으로 가정)
+        y_new_raw = [r.confirmed_data['actual'] for r in recs]
+        try:
+            y_new = pd.Series([float(y) for y in y_new_raw]) # 실제값도 숫자로 변환
+        except ValueError:
+            flash("추가된 정답 데이터에 유효하지 않은 값이 있어 재학습을 중단합니다.", "error")
+            return render_template('mlops/train_model.html',
+                                   form=form,
+                                   retrain_report=None,
+                                   retrain_mode=True,
+                                   model_id=model_id)
+
         # 기존 학습 데이터도 추가(오리지널 데이터)
-        preprocess_id = MLResult.query.filter_by(model_id=model_id).order_by(MLResult.id.desc()).first()
-        mlr = MLResult.query.get(preprocess_id.id)
-        ds = Dataset.query.get(mlr.dataset_id)
+        # MLResult에서 dataset_id를 가져오는 부분이 잘못되었습니다.
+        # last_result.dataset_id를 직접 사용해야 합니다.
+        ds = Dataset.query.get(last_result.dataset_id)
+        if not ds:
+            flash("오리지널 데이터셋을 찾을 수 없어 재학습을 진행할 수 없습니다.", "error")
+            return render_template('mlops/train_model.html',
+                                   form=form,
+                                   retrain_report=None,
+                                   retrain_mode=True,
+                                   model_id=model_id)
+
         orig_df = pd.DataFrame(ds.data)
-        orig_X = orig_df[features]
-        orig_y = orig_df[target]
-        X_total = pd.concat([orig_X,X_new],axis=0)
-        y_total = pd.concat([orig_y,pd.Series(y_new)],axis=0)
+
+        # 오리지널 데이터의 피처와 타겟도 적절한 타입으로 변환
+        orig_X = orig_df[features].astype(float) # 원본 X도 float으로 통일
+        orig_y = orig_df[target].astype(float) # 원본 y도 float으로 통일 (분류 타겟이라면 int)
+
+        # 컬럼 순서를 맞추기 위해 X_new를 orig_X와 동일한 컬럼 순서로 재정렬
+        X_new = X_new[features]
+
+        X_total = pd.concat([orig_X, X_new], axis=0).reset_index(drop=True)
+        y_total = pd.concat([orig_y, y_new], axis=0).reset_index(drop=True)
+
+        # 모델 생성 및 재학습
         model = create_model(model_info.model_type)
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
         scorers = {
@@ -313,19 +416,29 @@ def retrain(model_id):
             'precision': make_scorer(precision_score, average='weighted', zero_division=0),
             'recall': make_scorer(recall_score, average='weighted', zero_division=0),
             'f1': make_scorer(f1_score, average='weighted', zero_division=0),
-            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr')
+            # 이진 분류가 아닌 다중 클래스 분류라면 roc_auc_score의 multi_class와 average 설정 확인 필요
+            # needs_proba=True 또는 needs_threshold=True 설정에 따라 모델의 predict_proba 또는 decision_function 메소드가 필요함
+            'roc_auc': make_scorer(roc_auc_score, needs_proba=True, multi_class='ovr') # 'ovr' (One-vs-Rest) 또는 'ovo' (One-vs-One)
         }
         try:
             results = cross_validate(model, X_total, y_total, cv=cv, scoring=scorers)
             metrics = {k.replace('test_',''):float(np.mean(v)) for k,v in results.items() if k.startswith('test_')}
-            model.fit(X_total, y_total)
-            model_info.model_blob = dump_model(model)
+            model.fit(X_total, y_total) # 최종 모델 학습
+            model_info.model_blob = dump_model(model) # 새로 학습된 모델 저장
             db.session.commit()
             retrain_report = metrics
+            flash("모델이 성공적으로 재학습되었습니다!", "success")
         except Exception as e:
-            flash(f"재학습 중 오류: {e}")
+            flash(f"재학습 중 오류가 발생했습니다: {e}", "error")
             retrain_report = None
-    else:
+    elif request.method == 'POST' and len(recs) == 0:
+        flash("재학습을 위한 피드백 데이터가 없습니다. 추론 후 정답을 저장해주세요.", "info")
         retrain_report = None
+    else: # GET 요청 시
+        retrain_report = None
+
     return render_template('mlops/train_model.html',
-        retrain_report=retrain_report, retrain_mode=True, model_id=model_id)
+        form=form, # <-- form 객체를 템플릿으로 전달합니다.
+        retrain_report=retrain_report,
+        retrain_mode=True, # 이 플래그는 템플릿에서 재학습 모드임을 나타낼 때 유용합니다.
+        model_id=model_id)

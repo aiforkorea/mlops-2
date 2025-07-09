@@ -29,6 +29,7 @@
     </table>
 {% elif retrain_mode %}
     <form method="post">
+    {{ form.csrf_token }} {# Essential for security #}
         <button type="submit">재학습 시작(추론+정답 입력된 데이터 활용)</button>
     </form>
 {% endif %}
